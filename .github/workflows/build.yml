@@ -63,8 +63,9 @@ jobs:
         if: steps.base.outputs.skip != 'true'
         run: |
           echo "${{ steps.base.outputs.digest }}" > base.digest
-          git diff --quiet && exit 0
+          git add base.digest
+          git diff --cached --quiet && exit 0
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git commit -qam "Base updated to ${{ steps.base.outputs.digest }}"
+          git commit -qm "Base updated to ${{ steps.base.outputs.digest }}"
           git push -q
