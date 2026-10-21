@@ -1,0 +1,70 @@
+name: build
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+env:
+  BASE: docker.io/library/wordpress:php8.5-fpm
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve base digest
+        id: base
+        run: |
+          digest=$(docker buildx imagetools inspect "$BASE" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          # Scheduled runs only rebuild when upstream changed; pushes and manual runs always rebuild.
+          if [[ "$GITHUB_EVENT_NAME" == schedule && "$(cat base.digest 2>/dev/null)" == "$digest" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Base unchanged ($digest)"
+          fi
+
+      - name: Build
+        if: steps.base.outputs.skip != 'true'
+        run: docker build --pull --build-arg BASE="$BASE@${{ steps.base.outputs.digest }}" -t candidate .
+
+      - name: Test
+        if: steps.base.outputs.skip != 'true'
+        run: |
+          docker run --rm candidate php -r '
+            foreach (["imagick","redis","igbinary","ssh2","ftp","gmp","pdo_mysql","mysqli","gd","intl","zip","opcache"] as $e)
+              if (!extension_loaded($e) && !extension_loaded("Zend $e")) { fwrite(STDERR, "missing $e\n"); exit(1); }
+            echo "PHP ", PHP_VERSION, ", all extensions load\n";'
+          docker run --rm candidate php-fpm -t
+
+      - name: Push
+        if: steps.base.outputs.skip != 'true'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          php=$(docker run --rm candidate php -r 'echo PHP_VERSION;')
+          tag="php$php-$(date -u +%Y%m%d%H%M)"
+          for t in php8.5 "$tag"; do docker tag candidate "$IMAGE:$t"; docker push -q "$IMAGE:$t"; done
+          echo "Pushed $IMAGE:php8.5 and $IMAGE:$tag" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record base digest
+        # Also keeps the repo active, so GitHub does not disable the schedule after 60 idle days.
+        if: steps.base.outputs.skip != 'true'
+        run: |
+          echo "${{ steps.base.outputs.digest }}" > base.digest
+          git diff --quiet && exit 0
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -qam "Base updated to ${{ steps.base.outputs.digest }}"
+          git push -q
